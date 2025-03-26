@@ -1,27 +1,42 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim, heads, dropout=0.1):
+    def __init__(self, dim, heads, dropout=0.1, lora_alpha=1, lora_r=8):
         super(MultiHeadAttention, self).__init__()
         self.heads = heads
         self.head_dim = dim // heads
         self.scale = self.head_dim**-0.5
-
         self.qkv = nn.Linear(dim, dim * 3)
         self.attn_dropout = nn.Dropout(dropout)
         self.proj = nn.Linear(dim, dim)
         self.proj_dropout = nn.Dropout(dropout)
+        self.lora_alpha = lora_alpha
+        self.lora_r = lora_r
 
-    def forward(self, x):
+    def forward(self, x, lora_A=None, lora_B=None):
         batch_size, seq_len, dim = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(batch_size, seq_len, 3, self.heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
+
+        # Apply standard linear transformation
+        qkv_output = self.qkv(x)
+
+        # Add LoRA contribution if enabled
+        if lora_A is not None and lora_B is not None:
+            # LoRA: x -> A -> B -> output, with appropriate scaling
+            # Correct application:
+            # 1. x @ A.T, then the result @ B.T
+            # 2. Apply scaling factor alpha/r
+            lora_output = x @ lora_A.transpose(-1, -2) @ lora_B.transpose(-1, -2)
+            # Apply scaling factor
+            lora_output = lora_output * (self.lora_alpha / self.lora_r)
+            qkv_output = qkv_output + lora_output
+
+        qkv = qkv_output.reshape(
+            batch_size, seq_len, 3, self.heads, self.head_dim
+        ).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
@@ -60,6 +75,8 @@ class VisionTransformer(nn.Module):
         heads=12,
         mlp_dim=3072,
         dropout=0.1,
+        lora_alpha=16,
+        lora_r=8,
     ):
         super(VisionTransformer, self).__init__()
         self.img_size = img_size
@@ -70,6 +87,8 @@ class VisionTransformer(nn.Module):
         self.heads = heads
         self.mlp_dim = mlp_dim
         self.dropout_rate = dropout
+        self.lora_alpha = lora_alpha
+        self.lora_r = lora_r
 
         # Create patches
         self.patch_dim = (img_size // patch_size) ** 2
@@ -93,9 +112,19 @@ class VisionTransformer(nn.Module):
                 nn.ModuleList(
                     [
                         nn.LayerNorm(dim),
-                        MultiHeadAttention(dim=dim, heads=heads, dropout=dropout),
+                        MultiHeadAttention(
+                            dim=dim,
+                            heads=heads,
+                            dropout=dropout,
+                            lora_alpha=lora_alpha,
+                            lora_r=lora_r,
+                        ),
                         nn.LayerNorm(dim),
-                        FeedForward(dim=dim, hidden_dim=mlp_dim, dropout=dropout),
+                        FeedForward(
+                            dim=dim,
+                            hidden_dim=mlp_dim,
+                            dropout=dropout,
+                        ),
                     ]
                 )
             )
@@ -103,7 +132,11 @@ class VisionTransformer(nn.Module):
         # MLP head
         self.mlp_head = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, num_classes))
 
-    def forward(self, x):
+    def freeze_parameters(self):
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def forward(self, x, lora_A=None, lora_B=None):
         batch_size = x.shape[0]
 
         # Create patches
@@ -118,8 +151,11 @@ class VisionTransformer(nn.Module):
         x = x + self.position_embedding
 
         # Pass through transformer blocks with residual connections
-        for norm1, attn, norm2, ff in self.transformer_blocks:
-            x = x + attn(norm1(x))
+        for i, (norm1, attn, norm2, ff) in enumerate(self.transformer_blocks):
+            if lora_A is not None and lora_B is not None:
+                x = x + attn(norm1(x), lora_A[i], lora_B[i])
+            else:
+                x = x + attn(norm1(x))
             x = x + ff(norm2(x))
 
         # Use only the class token for classification
