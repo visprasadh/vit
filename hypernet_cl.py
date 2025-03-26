@@ -152,7 +152,7 @@ embedding_dim = 16
 
 hypernet_A = HyperNetwork(
     input_dim=embedding_dim,
-    hidden_dim=128,
+    hidden_dim=256,
     output_dim=r * 768,
     n_layers=n_transformer_layers,
     device=device,
@@ -162,7 +162,7 @@ hypernet_A = HyperNetwork(
 
 hypernet_B = HyperNetwork(
     input_dim=embedding_dim,
-    hidden_dim=128,
+    hidden_dim=256,
     output_dim=r * 2304,
     n_layers=n_transformer_layers,
     device=device,
@@ -224,7 +224,7 @@ def train_one_epoch(
     print(f"Epoch {epoch + 1}, Loss: {epoch_loss:.4f}")
 
 
-def test_model(model, lora_A, lora_B, test_loader, device):
+def test_model(model, hypernet_A, hypernet_B, test_loader, device):
     model.eval()  # Set model to evaluation mode
     total = 0
     correct = 0
@@ -234,6 +234,10 @@ def test_model(model, lora_A, lora_B, test_loader, device):
         for i, (images, labels) in enumerate(tqdm(test_loader, desc="Testing")):
             images = images.to(device)
             labels = labels.to(device)
+            lora_A = hypernet_A(task_embedding_A)
+            lora_A = lora_A.view(n_transformer_layers, r, 768)
+            lora_B = hypernet_B(task_embedding_B)
+            lora_B = lora_B.view(n_transformer_layers, 2304, r)
             outputs = model(images, lora_A, lora_B)
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
